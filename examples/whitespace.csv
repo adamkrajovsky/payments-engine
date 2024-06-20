@@ -1,0 +1,4 @@
+    type, client, tx,amount
+deposit,1,1,50
+ deposit,  1, 2, 50 
+withdrawal,1    , 4,  10
