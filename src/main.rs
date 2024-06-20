@@ -13,5 +13,5 @@ fn main() {
     let args = Args::parse();
     let mut engine = PaymentsEngine::new(args.input_file);
     engine.run();
-    engine.print_accounts();
+    engine.print_accounts(&mut std::io::stdout());
 }

@@ -125,7 +125,10 @@ impl PaymentsEngine {
                     }
                 }
                 Err(err) => {
-                    eprintln!("Failed to deserialize record: {}. Record will be skipped.", err);
+                    eprintln!(
+                        "Failed to deserialize record: {}. Record will be skipped.",
+                        err
+                    );
                     continue;
                 }
             }
@@ -133,8 +136,8 @@ impl PaymentsEngine {
     }
 
     /// Serialize the accounts to stdout as CSV
-    pub fn print_accounts(&self) {
-        let mut writer = csv::Writer::from_writer(std::io::stdout());
+    pub fn print_accounts<W: std::io::Write>(&self, writer: &mut W) {
+        let mut writer = csv::Writer::from_writer(writer);
         for account in self.accounts.values() {
             writer
                 .serialize(AccountSummary::from(account))
@@ -315,5 +318,17 @@ mod tests {
             engine.accounts.get(&1).expect("Account exists").available,
             Decimal::new(9000, 2)
         );
+    }
+
+    #[test]
+    fn test_print_accounts() {
+        let mut engine = PaymentsEngine::new("examples/simple_deposit.csv".to_string());
+        engine.run();
+
+        let mut buf = Vec::new();
+        engine.print_accounts(&mut buf);
+
+        let expected = "client,available,held,total,locked\n1,100.1001,0,100.1001,false\n";
+        assert_eq!(String::from_utf8(buf).unwrap(), expected);
     }
 }
