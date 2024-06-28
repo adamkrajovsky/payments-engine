@@ -25,6 +25,10 @@ enum Error {
     TxInvalidAmount(u32),
     #[error("Transaction (id: {0}) cannot be disputed as it is not a deposit")]
     InvalidDispute(u32),
+    #[error(
+        "Client id of {0:?} does not match the client id of the original transaction (tx id: {1})"
+    )]
+    ClientIdMismatch(TxType, u32),
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,9 +87,9 @@ impl From<&Account> for AccountSummary {
     fn from(account: &Account) -> Self {
         Self {
             client: account.client,
-            available: account.available,
-            held: account.held,
-            total: account.total(),
+            available: account.available.normalize(),
+            held: account.held.normalize(),
+            total: account.total().normalize(),
             locked: account.locked,
         }
     }
@@ -156,66 +160,77 @@ impl PaymentsEngine {
         }
 
         match tx.ty {
-            TxType::Deposit => {
+            TxType::Deposit | TxType::Withdrawal => {
                 let amount = tx.amount.ok_or(Error::MissingTxAmount(tx.id))?;
                 if amount <= Decimal::ZERO {
                     return Err(Error::TxInvalidAmount(tx.id));
                 }
-                account.available += amount;
+
+                match tx.ty {
+                    TxType::Deposit => {
+                        account.available += amount;
+                    }
+                    TxType::Withdrawal => {
+                        if account.available < amount {
+                            return Err(Error::NotEnoughFunds(tx.id));
+                        }
+                        account.available -= amount;
+                    }
+                    _ => unreachable!(),
+                }
                 self.txs.insert(tx.id, tx);
             }
-            TxType::Withdrawal => {
-                let amount = tx.amount.ok_or(Error::MissingTxAmount(tx.id))?;
-                if amount <= Decimal::ZERO {
-                    return Err(Error::TxInvalidAmount(tx.id));
-                } else if account.available < amount {
-                    return Err(Error::NotEnoughFunds(tx.id));
-                }
-                account.available -= amount;
-                self.txs.insert(tx.id, tx);
-            }
-            TxType::Dispute => {
+            TxType::Dispute | TxType::Resolve | TxType::ChargeBack => {
                 let original_tx = self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
-                if !matches!(original_tx.ty, TxType::Deposit) {
-                    // Only deposits can be disputed
-                    return Err(Error::InvalidDispute(tx.id));
+                if tx.client != original_tx.client {
+                    return Err(Error::ClientIdMismatch(tx.ty, tx.id));
                 }
 
-                if self.disputes.contains_key(&tx.id) {
-                    return Err(Error::TxAlreadyUnderDispute(tx.id));
-                }
+                match tx.ty {
+                    TxType::Dispute => {
+                        if !matches!(original_tx.ty, TxType::Deposit) {
+                            // Only deposits can be disputed
+                            return Err(Error::InvalidDispute(tx.id));
+                        }
 
-                let amount = original_tx
-                    .amount
-                    .expect("Deposit transaction has an amount");
-                account.available -= amount;
-                account.held += amount;
-                self.disputes.insert(tx.id, tx);
-            }
-            TxType::Resolve => {
-                // Cancellation of a dispute
-                let original_tx = self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
-                self.disputes
-                    .remove(&tx.id)
-                    .ok_or(Error::TxNotUnderDispute(tx.id))?;
-                let amount = original_tx
-                    .amount
-                    .expect("Deposit transaction has an amount");
-                account.available += amount;
-                account.held -= amount;
-            }
-            TxType::ChargeBack => {
-                // Deposit reversal
-                let original_tx = self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
-                self.disputes
-                    .remove(&tx.id)
-                    .ok_or(Error::TxNotUnderDispute(tx.id))?;
-                let amount = original_tx
-                    .amount
-                    .expect("Deposit transaction has an amount");
-                account.held -= amount;
-                account.locked = true;
-                self.txs.remove(&tx.id);
+                        if self.disputes.contains_key(&tx.id) {
+                            return Err(Error::TxAlreadyUnderDispute(tx.id));
+                        }
+
+                        let amount = original_tx
+                            .amount
+                            .expect("Deposit transaction has an amount");
+                        account.available -= amount;
+                        account.held += amount;
+                        self.disputes.insert(tx.id, tx);
+                    }
+                    TxType::Resolve => {
+                        // Cancellation of a dispute
+                        self.disputes
+                            .remove(&tx.id)
+                            .ok_or(Error::TxNotUnderDispute(tx.id))?;
+                        let amount = original_tx
+                            .amount
+                            .expect("Deposit transaction has an amount");
+                        account.available += amount;
+                        account.held -= amount;
+                    }
+                    TxType::ChargeBack => {
+                        // Deposit reversal
+                        let original_tx =
+                            self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
+                        self.disputes
+                            .remove(&tx.id)
+                            .ok_or(Error::TxNotUnderDispute(tx.id))?;
+                        let amount = original_tx
+                            .amount
+                            .expect("Deposit transaction has an amount");
+                        account.held -= amount;
+                        account.locked = true;
+                        self.txs.remove(&tx.id);
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
         Ok(())
