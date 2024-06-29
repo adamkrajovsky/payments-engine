@@ -23,12 +23,14 @@ enum Error {
     TxAlreadyUnderDispute(u32),
     #[error("Transaction (id: {0}) has an invalid amount")]
     TxInvalidAmount(u32),
-    #[error("Transaction (id: {0}) cannot be disputed as it is not a deposit")]
-    InvalidDispute(u32),
+    #[error("Invalid {0:?} as original transaction (id: {1}) is not a deposit")]
+    OriginalTxNotDeposit(TxType, u32),
     #[error(
         "Client id of {0:?} does not match the client id of the original transaction (tx id: {1})"
     )]
     ClientIdMismatch(TxType, u32),
+    #[error("Invalid {0:?} as it specifies an amount")]
+    TxSpecifiesAmount(TxType),
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,25 +183,25 @@ impl PaymentsEngine {
                 self.txs.insert(tx.id, tx);
             }
             TxType::Dispute | TxType::Resolve | TxType::ChargeBack => {
+                if tx.amount.is_some() {
+                    return Err(Error::TxSpecifiesAmount(tx.ty));
+                }
                 let original_tx = self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
                 if tx.client != original_tx.client {
                     return Err(Error::ClientIdMismatch(tx.ty, tx.id));
                 }
+                if !matches!(original_tx.ty, TxType::Deposit) {
+                    return Err(Error::OriginalTxNotDeposit(tx.ty, tx.id));
+                }
+                let amount = original_tx
+                    .amount
+                    .expect("Deposit transaction has an amount");
 
                 match tx.ty {
                     TxType::Dispute => {
-                        if !matches!(original_tx.ty, TxType::Deposit) {
-                            // Only deposits can be disputed
-                            return Err(Error::InvalidDispute(tx.id));
-                        }
-
                         if self.disputes.contains_key(&tx.id) {
                             return Err(Error::TxAlreadyUnderDispute(tx.id));
                         }
-
-                        let amount = original_tx
-                            .amount
-                            .expect("Deposit transaction has an amount");
                         account.available -= amount;
                         account.held += amount;
                         self.disputes.insert(tx.id, tx);
@@ -209,22 +211,14 @@ impl PaymentsEngine {
                         self.disputes
                             .remove(&tx.id)
                             .ok_or(Error::TxNotUnderDispute(tx.id))?;
-                        let amount = original_tx
-                            .amount
-                            .expect("Deposit transaction has an amount");
                         account.available += amount;
                         account.held -= amount;
                     }
                     TxType::ChargeBack => {
                         // Deposit reversal
-                        let original_tx =
-                            self.txs.get(&tx.id).ok_or(Error::TxDoesNotExist(tx.id))?;
                         self.disputes
                             .remove(&tx.id)
                             .ok_or(Error::TxNotUnderDispute(tx.id))?;
-                        let amount = original_tx
-                            .amount
-                            .expect("Deposit transaction has an amount");
                         account.held -= amount;
                         account.locked = true;
                         self.txs.remove(&tx.id);
